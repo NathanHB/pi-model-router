@@ -1,0 +1,77 @@
+{
+  "enabled": true,
+  "defaultTier": "cheap",
+  "capable": [
+    {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5",
+      "thinkingLevel": "high"
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "thinkingLevel": "high"
+    }
+  ],
+  "cheap": [
+    {
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5",
+      "thinkingLevel": "off"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5-mini",
+      "thinkingLevel": "off"
+    }
+  ],
+  "decision": {
+    "enabled": true,
+    "mode": "score",
+    "url": "http://127.0.0.1:9731",
+    "apiKey": "$LAYA_API_KEY",
+    "timeoutMs": 2000,
+    "minConfidence": 0.4,
+    "capableThreshold": 0.6,
+    "stateChars": 4000,
+    "scoreCriteria": [
+      "low: a question, a lookup of email/messages/notifications/issues/docs, a summary, or a tiny single-file edit (rename, typo, formatting, version bump, log line)",
+      "medium: a contained change or bug fix in one file, or explaining a snippet",
+      "high: multi-file work, open-ended investigation, design, migration, or security review"
+    ]
+  },
+  "capableKeywords": [
+    "architect",
+    "architecture",
+    "redesign",
+    "concurrency",
+    "migration",
+    "migrate",
+    "root cause"
+  ],
+  "cheapKeywords": [
+    "email",
+    "inbox",
+    "gmail",
+    "notification",
+    "notifications",
+    "typo",
+    "rename",
+    "formatting",
+    "lint",
+    "bump",
+    "summarize",
+    "summary",
+    "explain",
+    "look up",
+    "lookup",
+    "what's in",
+    "draft a reply"
+  ],
+  "promptLengthThreshold": 3000,
+  "imagesForceCapable": true,
+  "stickyCapableRequests": 0,
+  "bigPrefix": "!big",
+  "smallPrefix": "!small",
+  "notify": true
+}

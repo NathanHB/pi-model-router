@@ -1,0 +1,5 @@
+node_modules/
+.venv-laya/
+__pycache__/
+*.pyc
+.DS_Store

@@ -1,0 +1,19 @@
+{
+	"name": "pi-model-router",
+	"version": "0.1.0",
+	"description": "pi extension that routes each request to a cheap or a capable model, decided by the laya decision model",
+	"keywords": ["pi-package"],
+	"license": "MIT",
+	"type": "module",
+	"scripts": {
+		"check": "tsc --noEmit"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"typescript": "^5.9.0",
+		"@types/node": "^24.0.0"
+	}
+}
