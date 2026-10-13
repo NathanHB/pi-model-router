@@ -107,10 +107,10 @@ const DEFAULT_CONFIG: RouterConfig = {
 	cheap: [],
 	capable: [],
 	escalation: {
-		mode: "both",
+		mode: "tool",
 		tool: { promptHint: true },
 		encoder: {
-			enabled: true,
+			enabled: false,
 			url: "http://127.0.0.1:9731",
 			timeoutMs: 2000,
 			threshold: 0.75,

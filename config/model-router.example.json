@@ -15,12 +15,12 @@
 		}
 	],
 	"escalation": {
-		"mode": "both",
+		"mode": "tool",
 		"tool": {
 			"promptHint": true
 		},
 		"encoder": {
-			"enabled": true,
+			"enabled": false,
 			"url": "http://127.0.0.1:9731",
 			"apiKey": "$LAYA_API_KEY",
 			"timeoutMs": 2000,
