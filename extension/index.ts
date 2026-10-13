@@ -490,6 +490,26 @@ export default function modelRouter(pi: ExtensionAPI) {
 
 	/** Pick or set the model for a tier, and persist it to the config file. */
 	async function chooseTier(ctx: ExtensionContext, tier: Tier, explicit?: string): Promise<void> {
+		try {
+			await chooseTierUnsafe(ctx, tier, explicit);
+		} catch (err) {
+			// Never let a provider's auth blow up the session: an expired OAuth
+			// token rejects deep inside the registry.
+			notify(ctx, `Could not set the ${tier} tier: ${err instanceof Error ? err.message : String(err)}`, "error");
+		}
+	}
+
+	/** Configured providers, without resolving credentials (sync and safe). */
+	function providerHasAuth(ctx: ExtensionContext, provider: string): boolean {
+		try {
+			const status = ctx.modelRegistry.getProviderAuthStatus?.(provider);
+			return status ? !!status.configured : true;
+		} catch {
+			return false; // a provider whose status check throws is skipped, not fatal
+		}
+	}
+
+	async function chooseTierUnsafe(ctx: ExtensionContext, tier: Tier, explicit?: string): Promise<void> {
 		let provider: string | undefined;
 		let modelId: string | undefined;
 
@@ -508,16 +528,19 @@ export default function modelRouter(pi: ExtensionAPI) {
 		} else {
 			const current = (tier === "cheap" ? config.cheap : config.capable)[0];
 			const currentKey = current ? modelKey(current) : "";
-			const models = ctx.modelRegistry
-				.getAvailable()
-				.filter((m) => ctx.modelRegistry.getProviderAuth?.(m.provider))
-				.map((m) => `${m.provider}/${m.id}`)
-				.sort();
-			if (models.length === 0) {
+			const keys = Array.from(
+				new Set(
+					ctx.modelRegistry
+						.getAvailable()
+						.filter((m) => providerHasAuth(ctx, m.provider))
+						.map((m) => `${m.provider}/${m.id}`),
+				),
+			).sort();
+			if (keys.length === 0) {
 				notify(ctx, "No models with configured auth found", "error");
 				return;
 			}
-			const labels = models.map((key) => (key === currentKey ? `${key}  (current)` : key));
+			const labels = keys.map((key) => (key === currentKey ? `${key}  (current)` : key));
 			const choice = await ctx.ui.select(`Model for the ${tier} tier:`, labels);
 			if (!choice) return;
 			const key = choice.replace(/  \(current\)$/, "");
@@ -609,6 +632,8 @@ export default function modelRouter(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		config = loadConfig(ctx.cwd);
 
+		// Providers whose credentials cannot even be inspected (expired OAuth,
+		// for instance) must not stop the session from wiring up.
 		const entries = ctx.sessionManager.getEntries();
 		const stateEntry = entries
 			.filter((e: { type: string; customType?: string }) => e.type === "custom" && e.customType === "router-state")
