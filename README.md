@@ -1,48 +1,36 @@
 # pi-model-router
 
-A [pi](https://github.com/earendil-works/pi-coding-agent) extension that routes
-**each request** to a cheap or a capable model. The routing decision is made by
-[convaiinnovations/laya](https://huggingface.co/convaiinnovations/laya) — a 421M
-non-autoregressive decision model that classifies the prompt in a single forward
-pass (~35 ms) and returns a calibrated probability. It never generates text, so
-there is nothing to parse and nothing to hallucinate.
+A [pi](https://github.com/earendil-works/pi-coding-agent) extension that runs every
+request on a **cheap** model and escalates to a **capable** one *during the run*
+when the work turns out to need it.
 
-If the decision server is unreachable, the router falls back to keyword/length
-heuristics. The router is deliberately **cheap-biased**: routine work —
-questions, lookups (email, notifications, issues, docs), summaries, and small
-single-file edits — is never escalated, and an uncertain decision goes to the
-cheap model rather than the capable one.
+Two escalation mechanisms, selectable with `escalation.mode`:
 
-> **Measured baseline** (RouterBench, 9,000 prompts): the decision model's score
-> carries no ranking signal on out-of-domain prompts (AUC 0.53), so treat the
-> laya decision as experimental — the heuristics and the explicit `!big` /
-> `!small` markers are the reliable parts. See the companion repo
-> [router-eval](https://github.com/NathanHB/router-eval) for the evaluation
-> harness.
+| mode | how escalation happens |
+|---|---|
+| `tool` | the cheap model gets an `escalate` tool it can call when the task is beyond it |
+| `encoder` | after each turn, a small encoder model ([convaiinnovations/laya](https://huggingface.co/convaiinnovations/laya)) reads a compact summary of the run so far and predicts whether the cheap model will fail |
+| `both` (default) | either path can escalate |
 
-## How routing works
+Escalation switches the model for the rest of the run — pi picks the new model up
+on the next turn — and optionally keeps the capable model for the next N requests
+(`escalation.stickyCapableRequests`).
 
-For every user prompt (in `before_agent_start`, before the request is sent):
+## Why escalation instead of routing up front
 
-1. **One-shot pin** — `!big <msg>` / `!small <msg>` (or `/router big` then your
-   message) forces a tier for one request.
-2. **Sticky** — if `stickyCapableRequests > 0`, a capable request keeps the
-   capable model for N follow-up requests.
-3. **Laya decision** — the prompt (plus image count and length) is POSTed to
-   `laya-serve` at `/v1/systemone` as a `score` question with three capability
-   levels. The request gets the **capable** tier only when the **normalized
-   score ≥ `capableThreshold`** (default `0.6`). If the answer's calibrated
-   confidence is below `minConfidence`, the request goes **cheap** — ambiguity
-   never escalates.
-4. **Heuristic fallback** (server unreachable) — images, `promptLengthThreshold`,
-   keyword lists, then `defaultTier`.
+Routing on the prompt alone has a low ceiling: the prompt does not reveal whether
+a task is a one-line edit or a multi-module refactor, and the pair-specific
+failure of a cheap model is largely not a property of the prompt text. The
+trajectory does contain that information — commands that fail, errors that
+repeat, an agent going in circles — so this extension defers the decision until
+there is something to observe.
 
-The first model in the tier list that exists in your registry *and* has working
-auth is used (`pi.setModel` returns `false` otherwise and the next candidate is
-tried).
-
-The router pauses automatically when you pick a model yourself (`/model`,
-Ctrl+P) — your choice wins. Run `/router auto` to resume auto-routing.
+Measured honestly (see the companion `router-eval` harness): the encoder signal is
+**weak** on public benchmarks (AUC ≈ 0.5 on RouterBench and Terminal-Bench
+trajectories), so treat `encoder` mode as experimental and prefer `both` — the
+`escalate` tool is the reliable path, because the model itself knows when it is
+out of its depth. The encoder costs ~35 ms per check against a local server and
+never blocks the run (failures are ignored).
 
 ## Install
 
@@ -50,123 +38,68 @@ Ctrl+P) — your choice wins. Run `/router auto` to resume auto-routing.
 pi install git:github.com/NathanHB/pi-model-router
 ```
 
-Or try it without installing:
+Or try without installing: `pi -e git:github.com/NathanHB/pi-model-router`
 
-```bash
-pi -e git:github.com/NathanHB/pi-model-router
-```
-
-### 1. Configure models
-
-Copy the example to the global config location (project-local
-`.pi/model-router.json` overrides it per-key):
+## Configure
 
 ```bash
 mkdir -p ~/.pi/agent
 cp config/model-router.example.json ~/.pi/agent/model-router.json
 ```
 
-Edit `capable` / `cheap` lists. Each entry:
-
 ```json
-{ "provider": "anthropic", "model": "claude-haiku-4-5", "thinkingLevel": "off" }
+{
+  "cheap":   [{ "provider": "anthropic", "model": "claude-haiku-4-5", "thinkingLevel": "off" }],
+  "capable": [{ "provider": "anthropic", "model": "claude-sonnet-5",  "thinkingLevel": "high" }],
+  "escalation": { "mode": "both" }
+}
 ```
 
-`thinkingLevel` is optional and applied when that model is routed in.
-Find model ids with `pi --list-models`.
-
-### 2. Run the laya decision server
-
-```bash
-pip install "laya[serve]"
-laya-serve                      # listens on http://127.0.0.1:8000
-```
-
-or use the bundled helper (creates a venv, installs `laya[serve]`, starts the
-server):
-
-```bash
-scripts/start-laya.sh
-```
-
-The first request downloads the checkpoint (~850 MB) from Hugging Face.
-Preload with `LAYA_PRELOAD=1` for long-running use. The server automatically
-routes English prompts to the `laya` checkpoint and non-English prompts to
-`laya-multilingual`. See the [laya docs](https://github.com/NandhaKishorM/laya)
-for GPU, Docker, and fine-tuning options.
-
-If the server is not running, the extension transparently falls back to
-heuristics (with a one-time warning), so pi keeps working.
-
-### 3. Reload pi and check
-
-Run `/reload` (or restart pi), then `/router` to see the status. The footer
-shows `router: cheap:claude-haiku-4-5 [laya 0.93]` style decisions.
-
-## Commands & markers
-
-| Input | Effect |
-|---|---|
-| `/router` | Show routing status and config |
-| `/router on` / `/router off` | Enable / disable routing |
-| `/router auto` | Resume auto-routing after a manual model pick |
-| `/router decision` | Toggle the laya decision step (heuristics only when off) |
-| `/router big` / `/router small` | Pin a tier for the next request |
-| `!big <msg>` / `!small <msg>` | Same, inline (prefix is stripped before sending) |
-
-## Configuration reference
-
-`~/.pi/agent/model-router.json` (global) and `<cwd>/.pi/model-router.json`
-(project; merged per-key, project wins). See `config/model-router.example.json`
-for a full example.
-
-| Key | Default | Meaning |
+| key | default | meaning |
 |---|---|---|
-| `enabled` | `true` | Routing on at startup |
-| `defaultTier` | `"cheap"` | Tier when nothing matches (heuristic fallback) |
-| `capable` / `cheap` | `[]` | Ordered model candidate lists |
-| `decision.enabled` | `true` | Use the laya decision model |
-| `decision.mode` | `"score"` | `\"score\"` (3 capability levels) or `\"choice\"` (capable vs cheap) |
-| `decision.url` | `http://127.0.0.1:8000` | `laya-serve` base URL |
-| `decision.apiKey` | – | Bearer token; `$VAR` resolves from env |
-| `decision.timeoutMs` | `2000` | Give up on the decision call, fall back to heuristics |
-| `decision.capableThreshold` | `0.6` | Capability needed for the capable tier (see **Tuning the bias**) |
-| `decision.minConfidence` | `0.4` | Below this the answer is not trusted, so the request goes **cheap** |
-| `decision.stateChars` | `4000` | Prompt prefix length sent to laya |
-| `decision.scoreCriteria` | built-in (3 levels) | Score-mode levels the model classifies against |
-| `decision.criteria` / `decision.instructions` | built-in | Choice-mode options and question text |
-| `capableKeywords` / `cheapKeywords` | see example | Heuristic keyword triggers (fallback only) |
-| `promptLengthThreshold` | `3000` | Heuristic (fallback): longer prompts → capable |
-| `imagesForceCapable` | `true` | Image attachments → capable (cheap models often lack vision) |
-| `stickyCapableRequests` | `0` | Stay capable for N requests after a capable one |
-| `bigPrefix` / `smallPrefix` | `!big` / `!small` | One-shot markers |
-| `notify` | `true` | Notify when routing switches the model |
+| `cheap` / `capable` | `[]` | ordered candidate lists; the first with working auth is used |
+| `escalation.mode` | `"both"` | `tool`, `encoder`, or `both` |
+| `escalation.tool.promptHint` | `true` | append a one-line hint to the system prompt telling the model the tool exists |
+| `escalation.encoder.url` | `http://127.0.0.1:9731` | `laya-serve` base URL |
+| `escalation.encoder.threshold` | `0.75` | escalate when P(cheap fails) ≥ this |
+| `escalation.encoder.minConfidence` | `0.4` | never escalate on a less confident answer |
+| `escalation.encoder.checkEvery` / `maxChecks` | `1` / `8` | check cadence and cap |
+| `escalation.encoder.instructions` | built-in | the statement laya scores |
+| `escalation.stickyCapableRequests` | `0` | after an escalated run, start the next N requests capable |
+| `imagesForceCapable` | `true` | image attachments skip the cheap model |
+| `bigPrefix` / `smallPrefix` | `!big` / `!small` | one-shot start-tier pins |
+| `notify` | `true` | notify on escalation |
 
-## Tuning the bias
+### Encoder server
 
-The single most useful knob is `decision.capableThreshold`:
+```bash
+pip install "laya[serve]" && laya-serve     # or scripts/start-laya.sh
+```
 
-| Goal | Setting |
+The first request downloads the checkpoint (~850 MB). Without the server the
+extension simply skips encoder checks.
+
+## Commands
+
+| input | effect |
 |---|---|
-| Send almost everything to the cheap model | `0.75` |
-| **Default** — routine never escalates, complex still does | `0.6` |
-| Catch more mid-complexity work (more capable usage) | `0.45` |
+| `/router` | status: tiers, mode, current run's turns/checks, whether it escalated |
+| `/router on` / `off` | enable / disable |
+| `/router auto` | resume after a manual model pick |
+| `/router tool` / `encoder` / `both` | switch escalation mode at runtime |
+| `/router big` / `small` | start the next request on that tier |
+| `!big <msg>` / `!small <msg>` | same, inline |
 
-If you want a different split, edit `decision.scoreCriteria` — the wording is
-what the model actually classifies against.
+Picking a model yourself (`/model`, Ctrl+P) pauses auto-routing; `/router auto`
+resumes.
 
-## Notes & caveats
+## Notes
 
-- `pi.setModel` persists the selected model as pi's default in settings and
-  appends a model-change entry to the session — that is the only public API
-  for switching models, so frequent routing rewrites the default each time the
-  tier changes. This is cosmetic but worth knowing.
-- Routing happens once per agent run; mid-run steering/follow-up messages keep
-  the model of that run.
-- The decision call sees only the prompt text (first `stateChars` chars), not
-  the whole conversation.
-- The explicit `!big`/`!small` markers always win when you want certainty.
-
-## License
-
-MIT
+- `pi.setModel` persists the selected model as pi's default and appends a
+  model-change entry to the session — escalation therefore leaves the session on
+  the capable model until the next request resets it to cheap.
+- The encoder sees only the run so far (tool names/inputs, failure count,
+  repetition, last output tail, first 260 chars of the task) — not the full
+  conversation.
+- If the capable tier is unavailable (no auth), escalation reports it and the
+  cheap model continues.
