@@ -67,6 +67,7 @@ cp config/model-router.example.json ~/.pi/agent/model-router.json
 | `escalation.encoder.instructions` | built-in | the statement laya scores |
 | `escalation.stickyCapableRequests` | `0` | after an escalated run, start the next N requests capable |
 | `imagesForceCapable` | `true` | image attachments skip the cheap model |
+| `excludeProviders` | `[]` | providers hidden from the `/router cheap`/`capable` pickers (e.g. `"anthropic"` while its auth is broken) |
 | `bigPrefix` / `smallPrefix` | `!big` / `!small` | one-shot start-tier pins |
 | `notify` | `true` | notify on escalation |
 

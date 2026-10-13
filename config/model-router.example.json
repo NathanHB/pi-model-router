@@ -1,10 +1,18 @@
 {
 	"enabled": true,
 	"cheap": [
-		{ "provider": "anthropic", "model": "claude-haiku-4-5", "thinkingLevel": "off" }
+		{
+			"provider": "anthropic",
+			"model": "claude-haiku-4-5",
+			"thinkingLevel": "off"
+		}
 	],
 	"capable": [
-		{ "provider": "anthropic", "model": "claude-sonnet-5", "thinkingLevel": "high" }
+		{
+			"provider": "anthropic",
+			"model": "claude-sonnet-5",
+			"thinkingLevel": "high"
+		}
 	],
 	"escalation": {
 		"mode": "both",
@@ -27,5 +35,6 @@
 	"imagesForceCapable": true,
 	"bigPrefix": "!big",
 	"smallPrefix": "!small",
-	"notify": true
+	"notify": true,
+	"excludeProviders": []
 }

@@ -78,6 +78,8 @@ interface RouterConfig {
 	escalation: EscalationConfig;
 	/** Requests with image attachments skip the cheap model (often no vision) */
 	imagesForceCapable: boolean;
+	/** Providers hidden from the tier pickers (e.g. broken or unwanted auth) */
+	excludeProviders: string[];
 	bigPrefix: string;
 	smallPrefix: string;
 	notify: boolean;
@@ -112,6 +114,7 @@ const DEFAULT_CONFIG: RouterConfig = {
 		stickyCapableRequests: 0,
 	},
 	imagesForceCapable: true,
+	excludeProviders: [],
 	bigPrefix: "!big",
 	smallPrefix: "!small",
 	notify: true,
@@ -163,6 +166,7 @@ function serializeConfig(config: RouterConfig): string {
 			capable: config.capable,
 			escalation: config.escalation,
 			imagesForceCapable: config.imagesForceCapable,
+			excludeProviders: config.excludeProviders,
 			bigPrefix: config.bigPrefix,
 			smallPrefix: config.smallPrefix,
 			notify: config.notify,
@@ -511,29 +515,57 @@ export default function modelRouter(pi: ExtensionAPI) {
 	}
 
 	/**
-	 * Model picker. The built-in ui.select renders every row, so a catalogue-sized
-	 * list (~hundreds of models) floods the terminal and stops taking input; the
-	 * searchable, windowed SelectList is what pi's own pickers use for long lists.
+	 * Model picker: type-to-filter over the catalogue (substring match), with a
+	 * free-text fallback row so any model id can be typed directly. The built-in
+	 * ui.select renders every row, so a catalogue-sized list floods the terminal
+	 * and stops taking input — this is the same windowed SelectList pi's own
+	 * pickers use, with the query handling done here (SelectList only filters
+	 * on demand and matches by prefix).
 	 */
 	async function pickModel(ctx: ExtensionContext, title: string, labels: string[]): Promise<string | null> {
 		if (ctx.mode === "tui" && typeof ctx.ui.custom === "function") {
 			return await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+				const all: SelectItem[] = labels.map((label) => ({ value: label, label }));
+				let query = "";
+
 				const container = new Container();
-				const items: SelectItem[] = labels.map((label) => ({ value: label, label }));
-				const selectList = new SelectList(items, Math.min(items.length, 12), {
-					selectedPrefix: (text) => theme.fg("accent", text),
-					selectedText: (text) => theme.fg("accent", text),
-					description: (text) => theme.fg("muted", text),
-					scrollInfo: (text) => theme.fg("dim", text),
-					noMatch: (text) => theme.fg("warning", text),
-				});
-				selectList.onSelect = (item) => done(item.value ?? null);
-				selectList.onCancel = () => done(null);
+				const queryText = new Text("");
+				const listSlot = new Container();
+				const themeCallbacks = {
+					selectedPrefix: (text: string) => theme.fg("accent", text),
+					selectedText: (text: string) => theme.fg("accent", text),
+					description: (text: string) => theme.fg("muted", text),
+					scrollInfo: (text: string) => theme.fg("dim", text),
+					noMatch: (text: string) => theme.fg("warning", text),
+				};
+
+				const applyQuery = () => {
+					const q = query.trim().toLowerCase();
+					let filtered = q ? all.filter((item) => item.label.toLowerCase().includes(q)) : all.slice();
+					if (q && filtered.length === 0) {
+						// Free text: let the user commit an id that is not in the list;
+						// chooseTier validates it against the registry afterwards.
+						filtered = [{ value: query.trim(), label: `✎ use "${query.trim()}"` }];
+					}
+					listSlot.clear();
+					const selectList = new SelectList(filtered, Math.min(filtered.length, 12) || 1, themeCallbacks);
+					selectList.onSelect = (item) => done(item.value ?? null);
+					selectList.onCancel = () => done(null);
+					listSlot.addChild(selectList);
+					queryText.setText(
+						theme.fg("dim", `filter: ${query}${query ? "▌" : "…"}  (${filtered.length}/${all.length})`),
+					);
+				};
+
+				applyQuery();
 				container.addChild(new Text(theme.fg("accent", theme.bold(title))));
-				container.addChild(selectList);
-				container.addChild(
-					new Text(theme.fg("dim", "type to search · ↑↓ navigate · enter select · esc cancel")),
-				);
+				container.addChild(new Text(""));
+				container.addChild(queryText);
+				container.addChild(new Text(""));
+				container.addChild(listSlot);
+				container.addChild(new Text(""));
+				container.addChild(new Text(theme.fg("dim", "type to filter · ↑↓ select · enter confirm · esc cancel")));
+
 				return {
 					render(width: number) {
 						return container.render(width);
@@ -542,7 +574,15 @@ export default function modelRouter(pi: ExtensionAPI) {
 						container.invalidate();
 					},
 					handleInput(data: string) {
-						selectList.handleInput(data);
+						if (data === "\x7f" || data === "\b") {
+							query = query.slice(0, -1);
+							applyQuery();
+						} else if (data.length === 1 && data >= " " && data !== "\x7f") {
+							query += data;
+							applyQuery();
+						} else {
+							listSlot.children.at(-1)?.handleInput?.(data);
+						}
 						tui.requestRender();
 					},
 				};
@@ -575,6 +615,7 @@ export default function modelRouter(pi: ExtensionAPI) {
 					ctx.modelRegistry
 						.getAvailable()
 						.filter((m) => providerHasAuth(ctx, m.provider))
+						.filter((m) => !config.excludeProviders.some((p) => p.toLowerCase() === m.provider.toLowerCase()))
 						.map((m) => `${m.provider}/${m.id}`),
 				),
 			).sort();
