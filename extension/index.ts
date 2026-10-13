@@ -88,11 +88,19 @@ interface RouterConfig {
 const DEFAULT_INSTRUCTIONS =
 	"The agent currently working on this task with a cheap model will fail to complete it.";
 
+const TOOL_DESCRIPTION =
+	"Switch the rest of this task to a stronger model. Call this when the task " +
+	"needs reasoning, knowledge, or multi-file work beyond what you can do " +
+	"reliably — not for work you can complete yourself.";
+
+/** Injected into the system prompt when a run starts on the cheap tier: what
+ * the tool is, when to call it, and what happens after. */
 const PROMPT_HINT =
-	"\n\nYou are running on a fast, low-cost model. If you conclude this task " +
-	"needs stronger reasoning or broader knowledge than you can provide, call the " +
-	"`escalate` tool — the rest of the task will continue on a stronger model. " +
-	"Do not call it for work you can complete yourself.";
+	"\n\nYou are running on a fast, low-cost model. You have an `escalate` tool: " +
+	TOOL_DESCRIPTION +
+	" When you call it, the rest of this task continues on a stronger model " +
+	"automatically — you keep your progress and context. Do not call it for " +
+	"work you can complete yourself.";
 
 const DEFAULT_CONFIG: RouterConfig = {
 	enabled: true,
@@ -304,10 +312,7 @@ export default function modelRouter(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "escalate",
 		label: "Escalate",
-		description:
-			"Switch the rest of this task to a stronger model. Call this when the task " +
-			"needs reasoning, knowledge, or multi-file work beyond what you can do " +
-			"reliably — not for work you can complete yourself.",
+		description: TOOL_DESCRIPTION,
 		parameters: Type.Object({
 			reason: Type.Optional(
 				Type.String({ description: "One line: what specifically is beyond you" }),
