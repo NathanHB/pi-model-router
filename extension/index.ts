@@ -24,7 +24,7 @@
  * (project). See model-router.example.json and README.md.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -145,6 +145,30 @@ function loadConfig(cwd: string): RouterConfig {
 		}
 	}
 	return config;
+}
+
+/** Where tier changes are written: the project config if one exists (it wins
+ * over global per-key), otherwise the global config. */
+function configFilePath(cwd: string): string {
+	const projectPath = join(cwd, CONFIG_DIR_NAME, "model-router.json");
+	return existsSync(projectPath) ? projectPath : join(getAgentDir(), "model-router.json");
+}
+
+function serializeConfig(config: RouterConfig): string {
+	return JSON.stringify(
+		{
+			enabled: config.enabled,
+			cheap: config.cheap,
+			capable: config.capable,
+			escalation: config.escalation,
+			imagesForceCapable: config.imagesForceCapable,
+			bigPrefix: config.bigPrefix,
+			smallPrefix: config.smallPrefix,
+			notify: config.notify,
+		},
+		null,
+		"\t",
+	) + "\n";
 }
 
 function modelKey(m: { provider: string; model: string }): string {
@@ -464,12 +488,71 @@ export default function modelRouter(pi: ExtensionAPI) {
 		updateStatus(ctx);
 	});
 
+	/** Pick or set the model for a tier, and persist it to the config file. */
+	async function chooseTier(ctx: ExtensionContext, tier: Tier, explicit?: string): Promise<void> {
+		let provider: string | undefined;
+		let modelId: string | undefined;
+
+		if (explicit) {
+			const slash = explicit.indexOf("/");
+			if (slash <= 0) {
+				notify(ctx, `Use provider/model, e.g. /router ${tier} anthropic/claude-sonnet-5`, "error");
+				return;
+			}
+			provider = explicit.slice(0, slash);
+			modelId = explicit.slice(slash + 1);
+			if (!ctx.modelRegistry.find(provider, modelId)) {
+				notify(ctx, `Unknown model ${explicit} — check \`pi --list-models\``, "error");
+				return;
+			}
+		} else {
+			const current = (tier === "cheap" ? config.cheap : config.capable)[0];
+			const currentKey = current ? modelKey(current) : "";
+			const models = ctx.modelRegistry
+				.getAvailable()
+				.filter((m) => ctx.modelRegistry.getProviderAuth?.(m.provider))
+				.map((m) => `${m.provider}/${m.id}`)
+				.sort();
+			if (models.length === 0) {
+				notify(ctx, "No models with configured auth found", "error");
+				return;
+			}
+			const labels = models.map((key) => (key === currentKey ? `${key}  (current)` : key));
+			const choice = await ctx.ui.select(`Model for the ${tier} tier:`, labels);
+			if (!choice) return;
+			const key = choice.replace(/  \(current\)$/, "");
+			provider = key.slice(0, key.indexOf("/"));
+			modelId = key.slice(key.indexOf("/") + 1);
+		}
+
+		const previous = (tier === "cheap" ? config.cheap : config.capable)[0];
+		const entry: TierModel = {
+			provider,
+			model: modelId,
+			thinkingLevel: previous?.thinkingLevel ?? (tier === "cheap" ? "low" : "high"),
+		};
+		if (tier === "cheap") config.cheap = [entry];
+		else config.capable = [entry];
+
+		try {
+			const path = configFilePath(ctx.cwd);
+			writeFileSync(path, serializeConfig(config));
+			notify(ctx, `${tier} tier → ${modelKey(entry)} (saved to ${path})`);
+		} catch (err) {
+			notify(ctx, `${tier} tier → ${modelKey(entry)} (could not save config: ${err})`, "warning");
+		}
+		updateStatus(ctx, `${tier}:${entry.model}`);
+	}
+
 	// --- /router command -----------------------------------------------------------
 
 	pi.registerCommand("router", {
-		description: "Model router: status, on/off, auto, mode tool|encoder|both, big/small",
+		description: "Model router: status, on/off, auto, mode tool|encoder|both, cheap|capable, big/small",
 		handler: async (args, ctx) => {
-			const arg = (args ?? "").trim().toLowerCase();
+			const raw = (args ?? "").trim();
+			const [cmdRaw, ...restParts] = raw.split(/\s+/);
+			const arg = (cmdRaw ?? "").toLowerCase();
+			const rest = restParts.join(" "); // preserve case for model ids
 			switch (arg) {
 				case "on":
 					routingEnabled = true;
@@ -493,6 +576,10 @@ export default function modelRouter(pi: ExtensionAPI) {
 					setToolEnabled(toolModeActive());
 					notify(ctx, `model-router: escalation mode = ${arg}`, "info");
 					break;
+				case "cheap":
+				case "capable":
+					await chooseTier(ctx, arg as Tier, rest || undefined);
+					break;
 				case "big":
 				case "small":
 					pinnedTier = arg === "big" ? "capable" : "cheap";
@@ -508,6 +595,7 @@ export default function modelRouter(pi: ExtensionAPI) {
 							(encoderModeActive() ? ` (encoder @ ${config.escalation.encoder.url}, threshold ${config.escalation.encoder.threshold})` : ""),
 						`pending one-shot: ${pinnedTier ?? "none"} | sticky: ${stickyRemaining}`,
 						`current run: ${run.active ? `${run.turns} turns, ${run.checks} encoder checks${run.escalated ? `, ESCALATED (${run.reason})` : ""}` : "inactive"}`,
+						"set a tier: /router cheap [provider/model] | /router capable [provider/model]",
 					];
 					notify(ctx, `model-router\n${lines.join("\n")}`, "info");
 				}

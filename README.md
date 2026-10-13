@@ -84,11 +84,18 @@ extension simply skips encoder checks.
 | input | effect |
 |---|---|
 | `/router` | status: tiers, mode, current run's turns/checks, whether it escalated |
+| `/router cheap` | pick the cheap-tier model from a list (or `/router cheap provider/model` to set it directly) — saved to the config file |
+| `/router capable` | same for the capable tier |
 | `/router on` / `off` | enable / disable |
 | `/router auto` | resume after a manual model pick |
 | `/router tool` / `encoder` / `both` | switch escalation mode at runtime |
-| `/router big` / `small` | start the next request on that tier |
+| `/router big` / `small` | start the next request on that tier (one-shot) |
 | `!big <msg>` / `!small <msg>` | same, inline |
+
+`/router cheap` and `/router capable` only offer models that have working auth, and
+write to the project config (`.pi/model-router.json`) when one exists — since that
+file wins per-key — otherwise to `~/.pi/agent/model-router.json`. The choice takes
+effect on the next request; no reload needed.
 
 Picking a model yourself (`/model`, Ctrl+P) pauses auto-routing; `/router auto`
 resumes.
