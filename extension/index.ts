@@ -27,6 +27,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
+import { Container, SelectList, Text, type SelectItem } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 
@@ -509,6 +510,47 @@ export default function modelRouter(pi: ExtensionAPI) {
 		}
 	}
 
+	/**
+	 * Model picker. The built-in ui.select renders every row, so a catalogue-sized
+	 * list (~hundreds of models) floods the terminal and stops taking input; the
+	 * searchable, windowed SelectList is what pi's own pickers use for long lists.
+	 */
+	async function pickModel(ctx: ExtensionContext, title: string, labels: string[]): Promise<string | null> {
+		if (ctx.mode === "tui" && typeof ctx.ui.custom === "function") {
+			return await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+				const container = new Container();
+				const items: SelectItem[] = labels.map((label) => ({ value: label, label }));
+				const selectList = new SelectList(items, Math.min(items.length, 12), {
+					selectedPrefix: (text) => theme.fg("accent", text),
+					selectedText: (text) => theme.fg("accent", text),
+					description: (text) => theme.fg("muted", text),
+					scrollInfo: (text) => theme.fg("dim", text),
+					noMatch: (text) => theme.fg("warning", text),
+				});
+				selectList.onSelect = (item) => done(item.value ?? null);
+				selectList.onCancel = () => done(null);
+				container.addChild(new Text(theme.fg("accent", theme.bold(title))));
+				container.addChild(selectList);
+				container.addChild(
+					new Text(theme.fg("dim", "type to search · ↑↓ navigate · enter select · esc cancel")),
+				);
+				return {
+					render(width: number) {
+						return container.render(width);
+					},
+					invalidate() {
+						container.invalidate();
+					},
+					handleInput(data: string) {
+						selectList.handleInput(data);
+						tui.requestRender();
+					},
+				};
+			});
+		}
+		return (await ctx.ui.select(title, labels)) ?? null;
+	}
+
 	async function chooseTierUnsafe(ctx: ExtensionContext, tier: Tier, explicit?: string): Promise<void> {
 		let provider: string | undefined;
 		let modelId: string | undefined;
@@ -541,7 +583,7 @@ export default function modelRouter(pi: ExtensionAPI) {
 				return;
 			}
 			const labels = keys.map((key) => (key === currentKey ? `${key}  (current)` : key));
-			const choice = await ctx.ui.select(`Model for the ${tier} tier:`, labels);
+			const choice = await pickModel(ctx, `Model for the ${tier} tier:`, labels);
 			if (!choice) return;
 			const key = choice.replace(/  \(current\)$/, "");
 			provider = key.slice(0, key.indexOf("/"));
