@@ -1,7 +1,7 @@
 {
 	"name": "pi-model-router",
 	"version": "0.1.0",
-	"description": "pi extension that routes each request to a cheap or a capable model, decided by the laya decision model",
+	"description": "pi extension that starts every request on the cheap model and escalates to the capable tier when the model asks for a stronger one",
 	"keywords": [
 		"pi-package"
 	],
