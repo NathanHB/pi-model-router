@@ -2,19 +2,8 @@
  * Model Router extension — escalation architecture.
  *
  * The user defines a CHEAP and a CAPABLE model. Every request starts on the
- * cheap model. Escalation to the capable model happens *during* the run,
- * either because the model asks for it or because an encoder model predicts
- * the run is failing:
- *
- *   1. Tool escalation — the cheap model gets an `escalate` tool it can call
- *      when it decides the task is beyond it ("this needs a stronger model").
- *   2. Encoder escalation — after each turn, a compact summary of the run so
- *      far (tools called, failures, repetition, last output) is sent to the
- *      laya encoder (convaiinnovations/laya via `laya-serve`), which returns
- *      the calibrated probability that the cheap model will fail the task;
- *      above `escalation.encoder.threshold`, the extension escalates.
- *
- * `escalation.mode` picks the mechanism: "tool", "encoder", or "both".
+ * cheap model. Escalation to the capable model happens *during* the run, when
+ * the cheap model calls its `escalate` tool ("this needs a stronger model").
  *
  * One-shot pins still exist: `!big <msg>` starts the next request on the
  * capable model, `!small <msg>` forces cheap. If the user picks a model
@@ -27,13 +16,11 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { Container, SelectList, Text, type SelectItem } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 type Tier = "cheap" | "capable";
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-type EscalationMode = "tool" | "encoder" | "both";
 
 interface TierModel {
 	provider: string;
@@ -46,27 +33,8 @@ interface ToolConfig {
 	promptHint: boolean;
 }
 
-interface EncoderConfig {
-	enabled: boolean;
-	url: string;
-	apiKey?: string;
-	timeoutMs: number;
-	/** Calibrated P(cheap model will fail) needed to escalate */
-	threshold: number;
-	/** Below this answer confidence, never escalate */
-	minConfidence: number;
-	/** Check the trajectory every N turns (1 = every turn) */
-	checkEvery: number;
-	/** Give up on encoder checks after this many (the signal saturates) */
-	maxChecks: number;
-	/** The noul statement sent to laya; escalate prob = P(statement true) */
-	instructions: string;
-}
-
 interface EscalationConfig {
-	mode: EscalationMode;
 	tool: ToolConfig;
-	encoder: EncoderConfig;
 	/** After an escalated run, start the next N requests on the capable model */
 	stickyCapableRequests: number;
 }
@@ -84,9 +52,6 @@ interface RouterConfig {
 	smallPrefix: string;
 	notify: boolean;
 }
-
-const DEFAULT_INSTRUCTIONS =
-	"The agent currently working on this task with a cheap model will fail to complete it.";
 
 const TOOL_DESCRIPTION =
 	"Switch the rest of this task to a stronger model. Call this when the task " +
@@ -111,18 +76,7 @@ const DEFAULT_CONFIG: RouterConfig = {
 	cheap: [],
 	capable: [],
 	escalation: {
-		mode: "tool",
 		tool: { promptHint: true },
-		encoder: {
-			enabled: false,
-			url: "http://127.0.0.1:9731",
-			timeoutMs: 2000,
-			threshold: 0.75,
-			minConfidence: 0.4,
-			checkEvery: 1,
-			maxChecks: 8,
-			instructions: DEFAULT_INSTRUCTIONS,
-		},
 		stickyCapableRequests: 0,
 	},
 	imagesForceCapable: true,
@@ -136,11 +90,7 @@ function loadConfig(cwd: string): RouterConfig {
 	const paths = [join(getAgentDir(), "model-router.json"), join(cwd, CONFIG_DIR_NAME, "model-router.json")];
 	let config: RouterConfig = {
 		...DEFAULT_CONFIG,
-		escalation: {
-			...DEFAULT_CONFIG.escalation,
-			tool: { ...DEFAULT_CONFIG.escalation.tool },
-			encoder: { ...DEFAULT_CONFIG.escalation.encoder },
-		},
+		escalation: { ...DEFAULT_CONFIG.escalation, tool: { ...DEFAULT_CONFIG.escalation.tool } },
 	};
 	for (const path of paths) {
 		if (!existsSync(path)) continue;
@@ -152,7 +102,6 @@ function loadConfig(cwd: string): RouterConfig {
 					...config.escalation,
 					...escalation,
 					tool: { ...config.escalation.tool, ...(escalation.tool ?? {}) },
-					encoder: { ...config.escalation.encoder, ...(escalation.encoder ?? {}) },
 				};
 			}
 			config = { ...config, ...parsed };
@@ -207,32 +156,14 @@ function resolveApiKey(key: string | undefined): string | undefined {
 
 // --- one run's rolling state -------------------------------------------------
 
-interface ToolEvent {
-	tool: string;
-	input: string;
-	isError: boolean;
-	output: string;
-}
-
 interface RunState {
 	active: boolean;
 	escalated: boolean;
 	reason: string;
 	turns: number;
-	checks: number;
-	toolEvents: ToolEvent[];
-	taskBrief: string;
 }
 
-let run: RunState = {
-	active: false,
-	escalated: false,
-	reason: "",
-	turns: 0,
-	checks: 0,
-	toolEvents: [],
-	taskBrief: "",
-};
+let run: RunState = { active: false, escalated: false, reason: "", turns: 0 };
 
 // --- the extension -----------------------------------------------------------
 
@@ -300,17 +231,6 @@ export default function modelRouter(pi: ExtensionAPI) {
 		if (!enabled && has) pi.setActiveTools(active.filter((t) => t !== "escalate"));
 	}
 
-	function toolModeActive(): boolean {
-		return config.escalation.mode === "tool" || config.escalation.mode === "both";
-	}
-
-	function encoderModeActive(): boolean {
-		return (
-			(config.escalation.mode === "encoder" || config.escalation.mode === "both") &&
-			config.escalation.encoder.enabled
-		);
-	}
-
 	// --- the escalate tool ------------------------------------------------------
 
 	pi.registerTool({
@@ -323,12 +243,6 @@ export default function modelRouter(pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (!toolModeActive()) {
-				return {
-					content: [{ type: "text", text: "Tool escalation is disabled (encoder mode)." }],
-					details: { escalated: false },
-				};
-			}
 			const reason = `tool: ${(params.reason ?? "model request").slice(0, 120)}`;
 			const ok = await escalate(pi, ctx, reason);
 			return {
@@ -344,62 +258,6 @@ export default function modelRouter(pi: ExtensionAPI) {
 			};
 		},
 	});
-
-	// --- encoder: ask laya whether this run is failing --------------------------
-
-	function encoderState(): Record<string, unknown> {
-		const tools = run.toolEvents.map((e) => `${e.tool}: ${e.input}`.slice(0, 70));
-		const unique = Array.from(new Set(tools));
-		const repeated = tools.length > 1 ? 1 - unique.length / tools.length : 0;
-		return {
-			task_brief: run.taskBrief.slice(0, 260),
-			turns_seen: run.turns,
-			tool_calls: unique.slice(0, 8),
-			n_failed_tools: run.toolEvents.filter((e) => e.isError).length,
-			repeated_tool_fraction: Math.round(repeated * 100) / 100,
-			last_tool: tools.length ? tools[tools.length - 1] : "",
-			last_output_tail: (run.toolEvents.at(-1)?.output ?? "").slice(-240),
-		};
-	}
-
-	async function encoderCheck(ctx: ExtensionContext): Promise<void> {
-		const encoder = config.escalation.encoder;
-		const controller = new AbortController();
-		const timer = setTimeout(() => controller.abort(), encoder.timeoutMs);
-		const onUserAbort = () => controller.abort();
-		ctx.signal?.addEventListener("abort", onUserAbort);
-		try {
-			const headers: Record<string, string> = { "content-type": "application/json" };
-			const apiKey = resolveApiKey(encoder.apiKey);
-			if (apiKey) headers["authorization"] = `Bearer ${apiKey}`;
-			const body = {
-				state: encoderState(),
-				questions: { escalate: { type: "noul", instructions: encoder.instructions } },
-			};
-			const res = await fetch(`${encoder.url.replace(/\/$/, "")}/v1/systemone`, {
-				method: "POST",
-				headers,
-				body: JSON.stringify(body),
-				signal: controller.signal,
-			});
-			if (!res.ok) return;
-			const data = (await res.json()) as {
-				answers?: { escalate?: { type?: string; noul?: number; answer_confidence?: number } };
-			};
-			const answer = data.answers?.escalate;
-			if (!answer || answer.type !== "noul" || typeof answer.noul !== "number") return;
-			const confidence = typeof answer.answer_confidence === "number" ? answer.answer_confidence : 1;
-			if (confidence < encoder.minConfidence) return;
-			if (answer.noul >= encoder.threshold) {
-				await escalate(pi, ctx, `encoder p=${answer.noul.toFixed(2)}`);
-			}
-		} catch {
-			/* encoder unavailable: never block the run */
-		} finally {
-			clearTimeout(timer);
-			ctx.signal?.removeEventListener("abort", onUserAbort);
-		}
-	}
 
 	// --- events ------------------------------------------------------------------
 
@@ -425,15 +283,7 @@ export default function modelRouter(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
-		run = {
-			active: true,
-			escalated: false,
-			reason: "",
-			turns: 0,
-			checks: 0,
-			toolEvents: [],
-			taskBrief: event.prompt.slice(0, 400),
-		};
+		run = { active: true, escalated: false, reason: "", turns: 0 };
 
 		if (!routingEnabled || manualPin) {
 			lastStatus = manualPin ? "paused" : "off";
@@ -458,34 +308,9 @@ export default function modelRouter(pi: ExtensionAPI) {
 		updateStatus(ctx);
 
 		// The tool hint only makes sense when we actually started cheap.
-		if (applied && start === "cheap" && toolModeActive() && config.escalation.tool.promptHint) {
+		if (applied && start === "cheap" && config.escalation.tool.promptHint) {
 			return { systemPrompt: event.systemPrompt + PROMPT_HINT };
 		}
-	});
-
-	pi.on("tool_result", async (event) => {
-		if (!run.active || run.escalated) return;
-		const text = (event.content ?? [])
-			.filter((c): c is { type: "text"; text: string } => c.type === "text")
-			.map((c) => c.text)
-			.join(" ");
-		run.toolEvents.push({
-			tool: event.toolName,
-			input: JSON.stringify(event.input ?? {}).slice(0, 80),
-			isError: !!event.isError,
-			output: text,
-		});
-	});
-
-	pi.on("turn_end", async (_event, ctx) => {
-		if (!run.active || run.escalated || !encoderModeActive()) return;
-		run.turns += 1;
-		const encoder = config.escalation.encoder;
-		if (run.turns % encoder.checkEvery !== 0) return;
-		if (run.checks >= encoder.maxChecks) return;
-		if (run.toolEvents.length === 0) return; // nothing observable yet
-		run.checks += 1;
-		await encoderCheck(ctx);
 	});
 
 	pi.on("model_select", async (event, ctx) => {
@@ -523,83 +348,6 @@ export default function modelRouter(pi: ExtensionAPI) {
 		}
 	}
 
-	/**
-	 * Model picker: type-to-filter over the catalogue (substring match), with a
-	 * free-text fallback row so any model id can be typed directly. The built-in
-	 * ui.select renders every row, so a catalogue-sized list floods the terminal
-	 * and stops taking input — this is the same windowed SelectList pi's own
-	 * pickers use, with the query handling done here (SelectList only filters
-	 * on demand and matches by prefix).
-	 */
-	async function pickModel(ctx: ExtensionContext, title: string, labels: string[]): Promise<string | null> {
-		if (ctx.mode === "tui" && typeof ctx.ui.custom === "function") {
-			return await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-				const all: SelectItem[] = labels.map((label) => ({ value: label, label }));
-				let query = "";
-
-				const container = new Container();
-				const queryText = new Text("");
-				const listSlot = new Container();
-				const themeCallbacks = {
-					selectedPrefix: (text: string) => theme.fg("accent", text),
-					selectedText: (text: string) => theme.fg("accent", text),
-					description: (text: string) => theme.fg("muted", text),
-					scrollInfo: (text: string) => theme.fg("dim", text),
-					noMatch: (text: string) => theme.fg("warning", text),
-				};
-
-				const applyQuery = () => {
-					const q = query.trim().toLowerCase();
-					let filtered = q ? all.filter((item) => item.label.toLowerCase().includes(q)) : all.slice();
-					if (q && filtered.length === 0) {
-						// Free text: let the user commit an id that is not in the list;
-						// chooseTier validates it against the registry afterwards.
-						filtered = [{ value: query.trim(), label: `✎ use "${query.trim()}"` }];
-					}
-					listSlot.clear();
-					const selectList = new SelectList(filtered, Math.min(filtered.length, 12) || 1, themeCallbacks);
-					selectList.onSelect = (item) => done(item.value ?? null);
-					selectList.onCancel = () => done(null);
-					listSlot.addChild(selectList);
-					queryText.setText(
-						theme.fg("dim", `filter: ${query}${query ? "▌" : "…"}  (${filtered.length}/${all.length})`),
-					);
-				};
-
-				applyQuery();
-				container.addChild(new Text(theme.fg("accent", theme.bold(title))));
-				container.addChild(new Text(""));
-				container.addChild(queryText);
-				container.addChild(new Text(""));
-				container.addChild(listSlot);
-				container.addChild(new Text(""));
-				container.addChild(new Text(theme.fg("dim", "type to filter · ↑↓ select · enter confirm · esc cancel")));
-
-				return {
-					render(width: number) {
-						return container.render(width);
-					},
-					invalidate() {
-						container.invalidate();
-					},
-					handleInput(data: string) {
-						if (data === "\x7f" || data === "\b") {
-							query = query.slice(0, -1);
-							applyQuery();
-						} else if (data.length === 1 && data >= " " && data !== "\x7f") {
-							query += data;
-							applyQuery();
-						} else {
-							listSlot.children.at(-1)?.handleInput?.(data);
-						}
-						tui.requestRender();
-					},
-				};
-			});
-		}
-		return (await ctx.ui.select(title, labels)) ?? null;
-	}
-
 	async function chooseTierUnsafe(ctx: ExtensionContext, tier: Tier, explicit?: string): Promise<void> {
 		let provider: string | undefined;
 		let modelId: string | undefined;
@@ -633,7 +381,7 @@ export default function modelRouter(pi: ExtensionAPI) {
 				return;
 			}
 			const labels = keys.map((key) => (key === currentKey ? `${key}  (current)` : key));
-			const choice = await pickModel(ctx, `Model for the ${tier} tier:`, labels);
+			const choice = (await ctx.ui.select(`Model for the ${tier} tier:`, labels)) ?? null;
 			if (!choice) return;
 			const key = choice.replace(/  \(current\)$/, "");
 			provider = key.slice(0, key.indexOf("/"));
@@ -662,7 +410,7 @@ export default function modelRouter(pi: ExtensionAPI) {
 	// --- /router command -----------------------------------------------------------
 
 	pi.registerCommand("router", {
-		description: "Model router: status, on/off, auto, mode tool|encoder|both, cheap|capable, big/small",
+		description: "Model router: status, on/off, auto, cheap|capable, big/small",
 		handler: async (args, ctx) => {
 			const raw = (args ?? "").trim();
 			const [cmdRaw, ...restParts] = raw.split(/\s+/);
@@ -684,13 +432,6 @@ export default function modelRouter(pi: ExtensionAPI) {
 					stickyRemaining = 0;
 					notify(ctx, "model-router: auto (cheap start + escalation) active", "info");
 					break;
-				case "tool":
-				case "encoder":
-				case "both":
-					config.escalation.mode = arg as EscalationMode;
-					setToolEnabled(toolModeActive());
-					notify(ctx, `model-router: escalation mode = ${arg}`, "info");
-					break;
 				case "cheap":
 				case "capable":
 					await chooseTier(ctx, arg as Tier, rest || undefined);
@@ -705,11 +446,9 @@ export default function modelRouter(pi: ExtensionAPI) {
 						`enabled: ${routingEnabled}${manualPin ? " (paused — manual model selection)" : ""}`,
 						`cheap: ${config.cheap.map(modelKey).join(", ") || "(none)"}`,
 						`capable: ${config.capable.map(modelKey).join(", ") || "(none)"}`,
-						`escalation mode: ${config.escalation.mode}` +
-							(toolModeActive() ? " (escalate tool active)" : "") +
-							(encoderModeActive() ? ` (encoder @ ${config.escalation.encoder.url}, threshold ${config.escalation.encoder.threshold})` : ""),
+						`escalation: escalate tool ${config.escalation.tool.promptHint ? "with" : "without"} prompt hint`,
 						`pending one-shot: ${pinnedTier ?? "none"} | sticky: ${stickyRemaining}`,
-						`current run: ${run.active ? `${run.turns} turns, ${run.checks} encoder checks${run.escalated ? `, ESCALATED (${run.reason})` : ""}` : "inactive"}`,
+						`current run: ${run.active ? `${run.turns} turns${run.escalated ? `, ESCALATED (${run.reason})` : ""}` : "inactive"}`,
 						"set a tier: /router cheap [provider/model] | /router capable [provider/model]",
 					];
 					notify(ctx, `model-router\n${lines.join("\n")}`, "info");
@@ -738,7 +477,7 @@ export default function modelRouter(pi: ExtensionAPI) {
 		pinnedTier = null;
 		stickyRemaining = 0;
 		lastStatus = undefined;
-		setToolEnabled(toolModeActive());
+		setToolEnabled(true);
 
 		updateStatus(ctx);
 		if (ctx.hasUI && (config.cheap.length === 0 || config.capable.length === 0)) {
