@@ -91,7 +91,10 @@ const DEFAULT_INSTRUCTIONS =
 const TOOL_DESCRIPTION =
 	"Switch the rest of this task to a stronger model. Call this when the task " +
 	"needs reasoning, knowledge, or multi-file work beyond what you can do " +
-	"reliably — not for work you can complete yourself.";
+	"reliably — not for work you can complete yourself. Also call it when you " +
+	"have been working on a task and, after verifying your solution (tests, " +
+	"builds, runtime checks), it turns out wrong or buggy and the fix is not a " +
+	"trivial correction.";
 
 /** Injected into the system prompt when a run starts on the cheap tier: what
  * the tool is, when to call it, and what happens after. */
@@ -100,7 +103,8 @@ const PROMPT_HINT =
 	TOOL_DESCRIPTION +
 	" When you call it, the rest of this task continues on a stronger model " +
 	"automatically — you keep your progress and context. Do not call it for " +
-	"work you can complete yourself.";
+	"work you can complete yourself. If your verified solution is wrong or " +
+	"buggy, escalate instead of patching blindly.";
 
 const DEFAULT_CONFIG: RouterConfig = {
 	enabled: true,
